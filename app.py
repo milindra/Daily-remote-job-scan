@@ -7,6 +7,7 @@ import smtplib
 
 import requests
 import streamlit as st
+import re
 
 st.set_page_config(page_title="Remote Job Hunter", page_icon="🧭", layout="wide")
 
@@ -83,6 +84,115 @@ def load_jobs():
 
     return jobs, sha
 
+RESUME_PATH = "Milindra_Pratap_Singh (2).pdf"
+
+def load_resume_pdf():
+    """Load the existing resume from this GitHub repository."""
+    response = github_request("GET", RESUME_PATH)
+    response.raise_for_status()
+    payload = response.json()
+    encoded = payload.get("content", "").strip()
+
+    if not encoded:
+        raise RuntimeError(
+            "Resume content was not returned by GitHub. "
+            "Check the resume path and repository permissions."
+        )
+
+    return (
+        base64.b64decode(encoded),
+        RESUME_PATH,
+    )
+
+
+def find_public_emails(job_url):
+    """Extract publicly visible email addresses from a job posting."""
+    try:
+        response = requests.get(
+            job_url,
+            headers={"User-Agent": "Mozilla/5.0 RemoteJobHunter/1.0"},
+            timeout=12,
+        )
+        response.raise_for_status()
+
+        emails = set(re.findall(
+            r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+            response.text,
+            re.IGNORECASE,
+        ))
+
+        excluded = (
+            "noreply@", "no-reply@", "example.com",
+            "sentry.io", "wixpress.com",
+        )
+        emails = [
+            email for email in emails
+            if not email.lower().startswith(excluded)
+        ]
+
+        def priority(email):
+            local = email.split("@")[0].lower()
+            preferred = (
+                "recruit", "career", "hiring",
+                "talent", "jobs", "hr",
+            )
+            return (
+                0 if any(word in local for word in preferred) else 1,
+                email.lower(),
+            )
+
+        return sorted(emails, key=priority)
+
+    except Exception:
+        return []
+
+
+def india_remote_eligible(job):
+    """Keep remote roles explicitly open to India or a broad region."""
+    location = str(job.get("location", "")).lower()
+    description = str(job.get("description", "")).lower()
+    source = str(job.get("source", "")).lower()
+
+    eligible_regions = (
+        "india", "worldwide", "anywhere",
+        "apac", "asia-pacific", "asia pacific",
+    )
+    region_text = location + " " + description[:2000]
+
+    if not any(region in region_text for region in eligible_regions):
+        return False
+
+    remote_markers = (
+        "remote", "work from home", "distributed",
+        "work remotely",
+    )
+    is_remote = (
+        source in ("remotive", "remoteok")
+        or any(
+            marker in location + " " + description[:2000]
+            for marker in remote_markers
+        )
+    )
+
+    return is_remote
+
+
+def personalized_email_body(job):
+    return f"""Hello Hiring Team,
+
+    I am interested in the {job.get('title', 'Software Engineering')} opportunity at {job.get('company', 'your company')}.
+    
+    I have 7+ years of software engineering experience focused on backend systems, distributed services, cloud infrastructure, and real-time AI/voice systems. My technical experience includes Go, Java, C/C++, AWS, microservices, gRPC, Temporal, Redis, SQL/PostgreSQL, WebSockets, and AI/voice infrastructure.
+    
+    I would welcome the opportunity to discuss how my experience building scalable backend platforms and production services could contribute to your team. I have attached my resume for your consideration.
+    
+    Job posting: {job.get('url', '')}
+    
+    Best regards,
+    Milindra Pratap Singh
+    """
+
+
 def save_jobs(jobs, sha):
     content = base64.b64encode(json.dumps(jobs, indent=2, ensure_ascii=False).encode()).decode()
     body = {"message": f"Update job statuses via dashboard ({datetime.utcnow().isoformat()}Z)",
@@ -136,7 +246,11 @@ except Exception as e:
     st.error(f"Could not load job data from GitHub: {e}")
     st.stop()
 
-all_jobs = list(jobs.values())
+all_jobs = [
+    job for job in jobs.values()
+    if india_remote_eligible(job)
+]
+
 pending = [j for j in all_jobs if j.get("status", "pending") == "pending"]
 sent = [j for j in all_jobs if j.get("status") == "sent"]
 rejected = [j for j in all_jobs if j.get("status") == "rejected"]
@@ -186,36 +300,118 @@ with tab_jobs:
                     st.rerun()
             elif action == "Prepare email":
                 st.markdown("**Email draft**")
-                recipient = st.text_input("Verified recruiter / hiring email", key=f"to_{job['id']}", placeholder="name@company.com")
-                subject = st.text_input("Subject", value=job.get("email_subject", f"Interest in {job['title']} at {job['company']}"), key=f"subject_{job['id']}")
-                body = st.text_area("Message", value=job.get("email_body", ""), height=210, key=f"body_{job['id']}")
+
+                email_candidates_key = f"email_candidates_{job['id']}"
+                
+                if st.button(
+                    "Find public contact emails",
+                    key=f"find_email_{job['id']}",
+                ):
+                    with st.spinner("Checking the public job posting..."):
+                        st.session_state[email_candidates_key] = (
+                            find_public_emails(job["url"])
+                        )
+                
+                candidates = st.session_state.get(email_candidates_key, [])
+                
+                selected_email = "Enter manually"
+                if candidates:
+                    selected_email = st.selectbox(
+                        "Public email addresses found — verify before sending",
+                        ["Enter manually"] + candidates,
+                        key=f"email_choice_{job['id']}",
+                    )
+                else:
+                    st.caption(
+                        "No public email found on this page yet. "
+                        "Check the company's official careers page."
+                    )
+                
+                default_email = (
+                    selected_email if selected_email != "Enter manually" else ""
+                )
+                
+                recipient = st.text_input(
+                    "Verified recruiter / hiring email",
+                    value=default_email,
+                    key=f"to_{job['id']}_{selected_email}",
+                    placeholder="name@company.com",
+                )
+                
+                subject = st.text_input(
+                    "Subject",
+                    value=f"Interest in {job['title']} at {job['company']}",
+                    key=f"subject_{job['id']}",
+                )
+                
+                body = st.text_area(
+                    "Message",
+                    value=personalized_email_body(job),
+                    height=240,
+                    key=f"body_{job['id']}",
+                )
+                
+                resume = st.file_uploader(
+                    "Optional: upload a different resume PDF",
+                    type=["pdf"],
+                    key=f"resume_{job['id']}",
+                )
+                
+                st.caption(
+                    "Your repository resume is attached automatically unless "
+                    "you upload a different PDF."
+                )
+                st.warning(
+                    "Review the email address and message before sending. "
+                    "Nothing is sent automatically."
+                )
+
+                
                 resume = st.file_uploader("Attach resume PDF", type=["pdf"], key=f"resume_{job['id']}")
                 st.warning("Nothing is sent until you press Send approved email below. Use only a verified recipient.")
                 if st.button("Send approved email", type="primary", key=f"send_{job['id']}"):
                     if not recipient or "@" not in recipient:
                         st.error("Enter a verified recipient email.")
-                    elif not resume:
-                        st.error("Upload your resume PDF.")
+                    # elif not resume:
+                    #     st.error("Upload your resume PDF.")
                     else:
                         # Save current edited draft in the data store before sending.
                         job["email_subject"] = subject
                         job["email_body"] = body
+                        
                         try:
-                            # Refresh SHA before writes to avoid overwriting concurrent workflow updates.
                             latest, latest_sha = load_jobs()
                             latest_job = latest.get(job["id"], job)
+                        
+                            if resume:
+                                resume_bytes = resume.getvalue()
+                                resume_name = resume.name
+                            else:
+                                resume_bytes, resume_name = load_resume_pdf()
+                        
                             latest_job["email_subject"] = subject
                             latest_job["email_body"] = body
-                            send_email(latest_job, recipient, resume.getvalue(), resume.name)
+                        
+                            send_email(
+                                latest_job,
+                                recipient,
+                                resume_bytes,
+                                resume_name,
+                            )
+                        
                             latest_job["status"] = "sent"
                             latest_job["email_to"] = recipient
                             latest_job["sent_at"] = datetime.utcnow().isoformat() + "Z"
+                        
                             latest[job["id"]] = latest_job
                             save_jobs(latest, latest_sha)
+                        
                             st.success("Email sent and status saved.")
                             st.rerun()
+                        
                         except Exception as e:
                             st.error(f"Send failed or status could not be saved: {e}")
+
 
 with tab_sent:
     if not sent:
