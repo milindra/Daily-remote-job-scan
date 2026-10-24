@@ -251,6 +251,36 @@ def save_json(path: Path, data: Any) -> None:
     temp.replace(path)
 
 
+def india_remote_eligible(job: dict[str, Any]) -> bool:
+    """Accept remote jobs explicitly open to India or worldwide applicants."""
+    location = str(job.get("location", "")).lower()
+    description = str(job.get("description", "")).lower()
+    text = f"{location} {description}"
+
+    india_terms = (
+        "india",
+        "worldwide",
+        "work from anywhere",
+        "anywhere in the world",
+        "global remote",
+        "apac",
+        "asia-pacific",
+        "asia pacific",
+    )
+
+    remote_terms = (
+        "remote",
+        "work from home",
+        "work remotely",
+        "distributed team",
+        "anywhere",
+    )
+
+    india_eligible = any(term in text for term in india_terms)
+    remote_role = any(term in text for term in remote_terms)
+
+    return india_eligible and remote_role
+
 def scan(min_score: int = 5) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing = load_json(JOBS_FILE, {})
