@@ -254,7 +254,22 @@ def save_json(path: Path, data: Any) -> None:
 def scan(min_score: int = 5) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing = load_json(JOBS_FILE, {})
-    found = fetch_remotive() + fetch_remoteok() + fetch_arbeitnow()
+
+    # Remove old queue entries outside the target region.
+    existing = {
+        key: job for key, job in existing.items()
+        if india_remote_eligible(job)
+    }
+    
+    found = [
+        job
+        for job in (
+            fetch_remotive()
+            + fetch_remoteok()
+            + fetch_arbeitnow()
+        )
+        if india_remote_eligible(job)
+    ]
     added = 0
     for job in found:
         if job["score"] < min_score:
