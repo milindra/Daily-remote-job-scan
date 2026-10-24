@@ -44,13 +44,44 @@ def github_request(method, path, **kwargs):
     return requests.request(method, url, headers=headers, timeout=25, params={"ref": branch} if method == "GET" else None, **kwargs)
 
 def load_jobs():
+    # First request: get file metadata and SHA for future updates.
     r = github_request("GET", data_path)
+
     if r.status_code == 404:
         return {}, None
+
     r.raise_for_status()
     payload = r.json()
-    content = base64.b64decode(payload["content"]).decode("utf-8")
-    return json.loads(content), payload["sha"]
+    sha = payload.get("sha")
+    content = (payload.get("content") or "").strip()
+
+    # Normal case: GitHub returns base64-encoded file content.
+    if content and payload.get("encoding") == "base64":
+        decoded = base64.b64decode(content).decode("utf-8")
+        return json.loads(decoded), sha
+
+    # Fallback: fetch the file as raw content through the GitHub API.
+    raw_url = f"https://api.github.com/repos/{repo}/contents/{data_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.raw+json",
+    }
+    raw_response = requests.get(
+        raw_url,
+        headers=headers,
+        params={"ref": branch},
+        timeout=30,
+    )
+    raw_response.raise_for_status()
+
+    jobs = json.loads(raw_response.text)
+
+    if not isinstance(jobs, dict):
+        raise ValueError(
+            "jobs.json must contain a JSON object keyed by job ID."
+        )
+
+    return jobs, sha
 
 def save_jobs(jobs, sha):
     content = base64.b64encode(json.dumps(jobs, indent=2, ensure_ascii=False).encode()).decode()
